@@ -3560,15 +3560,9 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 					continue
 				}
 
-				// Extract text content
-				var content string
-				if msg.Message.Message != nil {
-					if conv := msg.Message.Message.GetConversation(); conv != "" {
-						content = conv
-					} else if ext := msg.Message.Message.GetExtendedTextMessage(); ext != nil {
-						content = ext.GetText()
-					}
-				}
+				// Preserve the same searchable text as the live-message path,
+				// including Business templates and media captions.
+				content := extractTextContent(msg.Message.Message)
 
 				// Extract media info - pass message timestamp + ID for unique filenames
 				var mediaType, filename, url string

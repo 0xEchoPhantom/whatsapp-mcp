@@ -774,6 +774,12 @@ Caveats:
 - **Only effective on a fresh pair.** With `whatsapp.db` already present, no new pair handshake fires and the flag is a no-op.
 - **Messages the phone has deleted are not recoverable** — auto-expire, low-storage cleanup, and manual delete all leave no trace for the phone to share.
 
+History sync preserves the same supported message text as live reception,
+including WhatsApp Business templates, button messages, and image/video/document
+captions. This applies to both active and archived chats. The fix does not
+retroactively restore text skipped by an older bridge: the affected messages
+must be delivered again through history sync, subject to the phone's limits.
+
 ### Requesting history for a single chat (on-demand)
 
 `--full-history-pair` only applies to a fresh pair, so recovering a gap in one
