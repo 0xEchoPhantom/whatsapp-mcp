@@ -4,6 +4,7 @@ import os.path
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -312,6 +313,62 @@ def _resolve_name_from_whatsmeow(jid: str) -> str | None:
         return None
     finally:
         if "conn" in locals():
+            conn.close()
+
+
+def _is_placeholder_chat_name(jid: str, name: str | None) -> bool:
+    """Report whether a stored chat name is one of the bridge's own fallbacks.
+
+    When the bridge cannot resolve a display name it writes the bare numeric
+    user-part of the JID (or "Group <id>") into chats.name. Those are stand-ins,
+    not names anyone chose, so they may be replaced by anything better we find.
+    """
+    if not name:
+        return True
+    bare = jid.split("@")[0]
+    return name == bare or name == f"Group {bare}"
+
+
+def _display_chat_name(jid: str, stored_name: str | None) -> str | None:
+    """Return the best display name for a chat.
+
+    messages.db is the source of truth and is used as-is whenever it holds a
+    real name. Only when it holds a placeholder do we consult whatsmeow's
+    contact store, which is where names live after a contact sync — the same
+    lookup get_sender_name already does for message senders. The placeholder is
+    kept when nothing better exists.
+
+    The lookup opens its own short-lived connection, so it is deliberately
+    gated on the placeholder check rather than run for every row.
+    """
+    placeholder = _is_placeholder_chat_name(jid, stored_name)
+    wrong_self_name = not placeholder and _is_stored_self_name(jid, stored_name)
+    if not placeholder and not wrong_self_name:
+        return stored_name
+    fallback = jid.split("@")[0] if wrong_self_name else stored_name
+    return _resolve_name_from_whatsmeow(jid) or fallback
+
+
+def _is_stored_self_name(jid: str, name: str | None) -> bool:
+    """Recognize outgoing-first DM names cached as our own account number."""
+    user, _, server = jid.partition("@")
+    if server not in ("s.whatsapp.net", "lid") or not name or not name.isdecimal() or user == name:
+        return False
+    conn = None
+    try:
+        conn = sqlite3.connect(Path(WHATSMEOW_DB_PATH).resolve().as_uri() + "?mode=ro", uri=True)
+        own_users = {
+            row[0].split("@")[0].split(":")[0]
+            for row in conn.execute("SELECT DISTINCT our_jid FROM whatsmeow_contacts")
+            if row[0]
+        }
+        peer = (_resolve_lid_to_phone(user) or user) if server == "lid" else user
+        named_user = _resolve_lid_to_phone(name) or name
+        return named_user in own_users and peer not in own_users
+    except sqlite3.Error:
+        return False
+    finally:
+        if conn is not None:
             conn.close()
 
 
@@ -726,7 +783,7 @@ def list_chats(
         for chat_data in chats:
             chat = Chat(
                 jid=chat_data[0],
-                name=chat_data[1],
+                name=_display_chat_name(chat_data[0], chat_data[1]),
                 last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
                 last_message=chat_data[3],
                 last_sender=chat_data[4],
@@ -862,7 +919,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
         for chat_data in chats:
             chat = Chat(
                 jid=chat_data[0],
-                name=chat_data[1],
+                name=_display_chat_name(chat_data[0], chat_data[1]),
                 last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
                 last_message=chat_data[3],
                 last_sender=chat_data[4],
@@ -980,7 +1037,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
 
         chat = Chat(
             jid=chat_data[0],
-            name=chat_data[1],
+            name=_display_chat_name(chat_data[0], chat_data[1]),
             last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
             last_message=chat_data[3],
             last_sender=chat_data[4],
@@ -1028,7 +1085,7 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
 
         chat = Chat(
             jid=chat_data[0],
-            name=chat_data[1],
+            name=_display_chat_name(chat_data[0], chat_data[1]),
             last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
             last_message=chat_data[3],
             last_sender=chat_data[4],
