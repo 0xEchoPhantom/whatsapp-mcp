@@ -1,7 +1,17 @@
-import signal
+# Keep stdio clients lightweight: enter the relay before importing MCP/WhatsApp.
+if __name__ == "__main__":
+    from shared_runtime import relay_main
+
+    raise SystemExit(relay_main())
+
+import contextvars
+import functools
+import os
 import sys
+from collections.abc import Awaitable, Callable
 from typing import Any
 
+import anyio
 from mcp.server.fastmcp import FastMCP
 
 from whatsapp import (
@@ -46,9 +56,56 @@ from whatsapp import (
 
 # Initialize FastMCP server
 mcp = FastMCP("whatsapp")
+read_only_mcp = FastMCP("whatsapp")
+READ_ONLY = os.environ.get("MCP_READ_ONLY") == "1"
+READ_ONLY_BLOCKED_TOOLS = {"send_message", "send_file", "send_audio_message"}
+audit_callback: contextvars.ContextVar[Callable[[str], Awaitable[None]] | None] = contextvars.ContextVar(
+    "whatsapp_audit_callback", default=None
+)
 
 
-@mcp.tool()
+def audit_tool_call(tool_name: str) -> None:
+    """Log only the tool name/time; never log arguments or message contents."""
+    print(
+        f"[whatsapp-mcp:audit] MCP_TOOL_CALL tool={tool_name}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def tool(*args: Any, **kwargs: Any):
+    """Register tools unless read-only mode explicitly blocks mutations."""
+    def decorator(function):
+        if READ_ONLY and function.__name__ in READ_ONLY_BLOCKED_TOOLS:
+            return function
+        @functools.wraps(function)
+        def audited(*fn_args: Any, **fn_kwargs: Any):
+            audit_tool_call(function.__name__)
+            return function(*fn_args, **fn_kwargs)
+
+        @functools.wraps(function)
+        async def dispatched(*fn_args: Any, **fn_kwargs: Any):
+            callback = audit_callback.get()
+            if callback is None:
+                audit_tool_call(function.__name__)
+            else:
+                # The relay acknowledges writing stderr before work may begin.
+                await callback(function.__name__)
+            # Blocking HTTP/audio/SQLite work must not freeze other sessions.
+            # Keep in-flight work tracked even if its client disconnects.
+            return await anyio.to_thread.run_sync(
+                functools.partial(function, *fn_args, **fn_kwargs), abandon_on_cancel=False
+            )
+
+        if function.__name__ not in READ_ONLY_BLOCKED_TOOLS:
+            read_only_mcp.tool(*args, **kwargs)(dispatched)
+        mcp.tool(*args, **kwargs)(dispatched)
+        return audited
+
+    return decorator
+
+
+@tool()
 def search_contacts(query: str) -> list[dict[str, Any]]:
     """Search WhatsApp contacts by name or phone number.
 
@@ -59,7 +116,7 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
     return contacts
 
 
-@mcp.tool()
+@tool()
 def get_contact(
     identifier: str | None = None,
     phone_number: str | None = None,
@@ -155,7 +212,7 @@ def get_contact(
     }
 
 
-@mcp.tool()
+@tool()
 def list_messages(
     after: str | None = None,
     before: str | None = None,
@@ -204,7 +261,7 @@ def list_messages(
     return messages
 
 
-@mcp.tool()
+@tool()
 def list_chats(
     query: str | None = None,
     limit: int = 50,
@@ -229,7 +286,7 @@ def list_chats(
     return chats
 
 
-@mcp.tool()
+@tool()
 def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]:
     """Get WhatsApp chat metadata by JID.
 
@@ -241,7 +298,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
     return chat
 
 
-@mcp.tool()
+@tool()
 def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any]:
     """Get WhatsApp chat metadata by sender phone number.
 
@@ -252,7 +309,7 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any]:
     return chat
 
 
-@mcp.tool()
+@tool()
 def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str, Any]]:
     """Get all WhatsApp chats involving the contact.
 
@@ -265,7 +322,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
     return chats
 
 
-@mcp.tool()
+@tool()
 def get_last_interaction(jid: str) -> dict[str, Any]:
     """Get most recent WhatsApp message involving the contact.
 
@@ -279,7 +336,7 @@ def get_last_interaction(jid: str) -> dict[str, Any]:
     return message if message else {}
 
 
-@mcp.tool()
+@tool()
 def get_message_context(message_id: str, before: int = 5, after: int = 5) -> dict[str, Any]:
     """Get context around a specific WhatsApp message.
 
@@ -292,7 +349,7 @@ def get_message_context(message_id: str, before: int = 5, after: int = 5) -> dic
     return context
 
 
-@mcp.tool()
+@tool()
 def send_message(recipient: str, message: str) -> dict[str, Any]:
     """Send a WhatsApp message to a person or group. For group chats use the JID.
 
@@ -313,7 +370,7 @@ def send_message(recipient: str, message: str) -> dict[str, Any]:
     return {"success": success, "message": status_message}
 
 
-@mcp.tool()
+@tool()
 def send_file(recipient: str, media_path: str) -> dict[str, Any]:
     """Send a file such as a picture, raw audio, video or document via WhatsApp to the specified recipient. For group messages use the JID.
 
@@ -331,7 +388,7 @@ def send_file(recipient: str, media_path: str) -> dict[str, Any]:
     return {"success": success, "message": status_message}
 
 
-@mcp.tool()
+@tool()
 def send_audio_message(recipient: str, media_path: str) -> dict[str, Any]:
     """Send any audio file as a WhatsApp audio message to the specified recipient. For group messages use the JID. If it errors due to ffmpeg not being installed, use send_file instead.
 
@@ -347,7 +404,7 @@ def send_audio_message(recipient: str, media_path: str) -> dict[str, Any]:
     return {"success": success, "message": status_message}
 
 
-@mcp.tool()
+@tool()
 def download_media(message_id: str, chat_jid: str) -> dict[str, Any]:
     """Download media from a WhatsApp message and get the local file path.
 
@@ -369,12 +426,3 @@ def download_media(message_id: str, chat_jid: str) -> dict[str, Any]:
 def shutdown_handler(signum, frame):
     """Handle shutdown signals gracefully to prevent zombie processes."""
     sys.exit(0)
-
-
-if __name__ == "__main__":
-    # Register signal handlers for clean shutdown
-    signal.signal(signal.SIGINT, shutdown_handler)
-    signal.signal(signal.SIGTERM, shutdown_handler)
-
-    # Initialize and run the server
-    mcp.run(transport="stdio")

@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"image/png"
 	"math"
 	"math/rand"
 	"net/http"
@@ -30,6 +31,7 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
+	"rsc.io/qr"
 )
 
 // Whether to forward messages sent by self via webhook.
@@ -51,6 +53,27 @@ func getEnvBool(key string, def bool) bool {
 	default:
 		return def
 	}
+}
+
+// savePairQR keeps the one-time pairing code visible when the bridge runs as
+// a background task without a terminal attached.
+func savePairQR(code string) error {
+	qrCode, err := qr.Encode(code, qr.M)
+	if err != nil {
+		return err
+	}
+	f, err := os.Create("pair-qr.png")
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return png.Encode(f, qrCode.Image())
+}
+
+// savePairCode keeps the short-lived phone-linking code available to a
+// background task without exposing it in the task's terminal output.
+func savePairCode(code string) error {
+	return os.WriteFile("pair-code.txt", []byte(code+"\n"), 0600)
 }
 
 // Message represents a chat message for our client
@@ -1452,22 +1475,70 @@ func main() {
 				continue
 			}
 
-			// Print QR code for pairing with phone
-			qrCodeShown := false
-			for evt := range qrChan {
-				if evt.Event == "code" {
-					if !qrCodeShown {
-						fmt.Println("\nScan this QR code with your WhatsApp app:")
-						qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
-						fmt.Println("\nWaiting for QR code scan...")
-						qrCodeShown = true
+			// A phone number enables WhatsApp's short pairing-code flow, which is
+			// reliable when a transport re-encodes QR images.
+			if pairPhone := strings.TrimSpace(os.Getenv("WHATSAPP_PAIR_PHONE")); pairPhone != "" {
+				firstEvt, ok := <-qrChan
+				if !ok || firstEvt.Event != "code" {
+					logger.Errorf("Pairing code flow did not receive the initial QR event")
+					client.Disconnect()
+					continue
+				}
+				pairCode, pairErr := client.PairPhone(ctx, pairPhone, true, whatsmeow.PairClientChrome, "Chrome (Windows)")
+				if pairErr != nil {
+					logger.Errorf("Failed to generate phone pairing code: %v", pairErr)
+					client.Disconnect()
+					continue
+				}
+				if err := savePairCode(pairCode); err != nil {
+					logger.Warnf("Failed to save pairing code: %v", err)
+				} else {
+					logger.Infof("Phone pairing code saved to pair-code.txt")
+				}
+				fmt.Printf("\\nEnter this WhatsApp pairing code on the phone: %s\\n", pairCode)
+				// PairPhone completes through a pair-success event, not the QR
+				// channel. The event handler persists Store.ID asynchronously.
+				poll := time.NewTicker(500 * time.Millisecond)
+				pairDeadline := time.NewTimer(5 * time.Minute)
+				for {
+					select {
+					case <-poll.C:
+						if client.Store.ID != nil {
+							poll.Stop()
+							pairDeadline.Stop()
+							connected <- true
+							goto pairingCodeComplete
+						}
+					case <-pairDeadline.C:
+						poll.Stop()
+						logger.Warnf("Phone pairing code timed out")
+						goto pairingCodeComplete
 					}
-				} else if evt.Event == "success" {
-					connected <- true
-					break
-				} else if evt.Event == "timeout" {
-					logger.Warnf("QR code timed out")
-					break
+				}
+			pairingCodeComplete:
+			} else {
+				// Print QR code for pairing with phone
+				qrCodeShown := false
+				for evt := range qrChan {
+					if evt.Event == "code" {
+						if !qrCodeShown {
+							if err := savePairQR(evt.Code); err != nil {
+								logger.Warnf("Failed to save pairing QR image: %v", err)
+							} else {
+								logger.Infof("Pairing QR image saved to pair-qr.png")
+							}
+							fmt.Println("\nScan this QR code with your WhatsApp app:")
+							qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
+							fmt.Println("\nWaiting for QR code scan...")
+							qrCodeShown = true
+						}
+					} else if evt.Event == "success" {
+						connected <- true
+						break
+					} else if evt.Event == "timeout" {
+						logger.Warnf("QR code timed out")
+						break
+					}
 				}
 			}
 
