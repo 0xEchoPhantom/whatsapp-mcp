@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  bxv/launchd.plist.template — bản tham chiếu của LaunchAgent mà bộ cài upstream
+  (scripts/install-launchd-macos.sh) tự sinh ra ở ~/Library/LaunchAgents/com.whatsapp-mcp.bridge.plist.
+
+  KHÔNG cần điền tay: bxv/install.sh gọi bộ cài upstream, nó điền các giá trị dưới đây.
+  File này tồn tại để người/agent đọc hiểu daemon chạy gì, và để sửa tay khi bộ cài upstream
+  không dùng được (điền __HOME__, __REPO__ rồi chép vào ~/Library/LaunchAgents/).
+
+  Khác với daemon đời cũ trên máy Vũ (com.vupham.whatsapp-bridge): KHÔNG ghi số điện thoại hay
+  token vào plist. Biến môi trường (port, tên thiết bị, token) nằm ở
+  ~/Library/Application Support/whatsapp-mcp/launchd.env (mode 600), runner script nạp rồi exec bridge.
+  Kèm theo là job com.whatsapp-mcp.bridge-monitor chạy mỗi 60s báo khi bridge rớt/cần quét lại QR.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key><string>com.whatsapp-mcp.bridge</string>
+    <key>ProgramArguments</key>
+    <array>
+      <string>__HOME__/Library/Application Support/whatsapp-mcp/run-whatsapp-bridge.sh</string>
+    </array>
+    <key>WorkingDirectory</key><string>__REPO__/whatsapp-bridge</string>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>ThrottleInterval</key><integer>10</integer>
+    <key>StandardOutPath</key><string>__HOME__/Library/Logs/whatsapp-mcp/bridge.out.log</string>
+    <key>StandardErrorPath</key><string>__HOME__/Library/Logs/whatsapp-mcp/bridge.err.log</string>
+  </dict>
+</plist>

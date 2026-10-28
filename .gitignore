@@ -53,3 +53,4 @@ build/
 .coverage
 htmlcov/
 /store
+bxv/state/
