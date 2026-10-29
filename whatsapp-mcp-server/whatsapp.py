@@ -760,17 +760,19 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
             conn.close()
 
 
-def send_message(recipient: str, message: str) -> tuple[bool, str]:
+def send_message(recipient: str, message: str, mentions: list[str] | None = None) -> tuple[bool, str]:
     try:
         # Validate input
         if not recipient:
             return False, "Recipient must be provided"
 
         url = f"{WHATSAPP_API_BASE_URL}/send"
-        payload = {
+        payload: dict[str, Any] = {
             "recipient": recipient,
             "message": message,
         }
+        if mentions:
+            payload["mentions"] = mentions
 
         response = requests.post(url, json=payload)
 

@@ -476,10 +476,85 @@ type SendMessageRequest struct {
 	Recipient string `json:"recipient"`
 	Message   string `json:"message"`
 	MediaPath string `json:"media_path,omitempty"`
+	// Mentions lists people to tag in a group: phone numbers (country code, digits
+	// only) or JIDs. The message must contain "@<phone>" for each one.
+	Mentions []string `json:"mentions,omitempty"`
+}
+
+// applyGroupMentions resolves each mention against the group's participants and
+// rewrites "@<phone>" tokens to "@<user part of the JID the group addresses>",
+// which is what WhatsApp clients render as a tag. Fails closed: a mention that is
+// not a participant or has no "@<phone>" token in the text aborts the send, so
+// the caller never believes someone was tagged when they were not.
+func applyGroupMentions(message string, mentions []string, participants []types.GroupParticipant) (string, []string, error) {
+	var mentioned []string
+	seen := map[string]bool{}
+	for _, raw := range mentions {
+		key := strings.TrimSpace(raw)
+		if strings.Contains(key, "@") {
+			jid, err := types.ParseJID(key)
+			if err != nil {
+				return "", nil, fmt.Errorf("mention %q is not a valid JID: %v", raw, err)
+			}
+			key = jid.User
+		}
+		key = strings.TrimPrefix(key, "+")
+		if key == "" || strings.Trim(key, "0123456789") != "" {
+			return "", nil, fmt.Errorf("mention %q must be a phone number (digits only) or a JID", raw)
+		}
+
+		var target *types.GroupParticipant
+		for i := range participants {
+			p := &participants[i]
+			if p.JID.User == key || p.PhoneNumber.User == key || p.LID.User == key {
+				target = p
+				break
+			}
+		}
+		if target == nil {
+			return "", nil, fmt.Errorf("%s is not a member of this group, nothing was sent", key)
+		}
+		jid := target.JID.ToNonAD()
+		if seen[jid.String()] {
+			continue
+		}
+		seen[jid.String()] = true
+
+		replaced := false
+		for _, token := range []string{"@+" + key, "@" + key} {
+			if idx := indexToken(message, token); idx >= 0 {
+				message = message[:idx] + "@" + jid.User + message[idx+len(token):]
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			return "", nil, fmt.Errorf("message must contain \"@%s\" where %s should be tagged, nothing was sent", key, key)
+		}
+		mentioned = append(mentioned, jid.String())
+	}
+	return message, mentioned, nil
+}
+
+// indexToken finds token in s where it is not followed by another digit, so
+// "@8490" does not match inside "@84901".
+func indexToken(s, token string) int {
+	from := 0
+	for {
+		idx := strings.Index(s[from:], token)
+		if idx < 0 {
+			return -1
+		}
+		end := from + idx + len(token)
+		if end == len(s) || s[end] < '0' || s[end] > '9' {
+			return from + idx
+		}
+		from = end
+	}
 }
 
 // Function to send a WhatsApp message
-func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string, mediaPath string) (bool, string) {
+func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string, mediaPath string, mentions []string) (bool, string) {
 	if !client.IsConnected() {
 		return false, "Not connected to WhatsApp"
 	}
@@ -658,7 +733,25 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 			}
 		}
 	} else {
-		msg.Conversation = proto.String(message)
+		if len(mentions) > 0 {
+			if recipientJID.Server != types.GroupServer {
+				return false, "Mentions only work when sending to a group JID"
+			}
+			info, err := client.GetGroupInfo(context.Background(), recipientJID)
+			if err != nil {
+				return false, fmt.Sprintf("Could not load group members to verify mentions, nothing was sent: %v", err)
+			}
+			text, mentioned, err := applyGroupMentions(message, mentions, info.Participants)
+			if err != nil {
+				return false, err.Error()
+			}
+			msg.ExtendedTextMessage = &waProto.ExtendedTextMessage{
+				Text:        proto.String(text),
+				ContextInfo: &waProto.ContextInfo{MentionedJID: mentioned},
+			}
+		} else {
+			msg.Conversation = proto.String(message)
+		}
 	}
 
 	// Send message
@@ -1149,10 +1242,15 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			return
 		}
 
+		if len(req.Mentions) > 0 && (req.MediaPath != "" || req.Message == "") {
+			http.Error(w, "Mentions only work with a text message", http.StatusBadRequest)
+			return
+		}
+
 		fmt.Println("Received request to send message", req.Message, req.MediaPath)
 
 		// Send the message
-		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath)
+		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath, req.Mentions)
 		fmt.Println("Message sent", success, message)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")

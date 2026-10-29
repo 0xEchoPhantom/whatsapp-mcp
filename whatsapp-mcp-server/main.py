@@ -350,13 +350,19 @@ def get_message_context(message_id: str, before: int = 5, after: int = 5) -> dic
 
 
 @tool()
-def send_message(recipient: str, message: str) -> dict[str, Any]:
+def send_message(recipient: str, message: str, mentions: list[str] | None = None) -> dict[str, Any]:
     """Send a WhatsApp message to a person or group. For group chats use the JID.
+
+    To tag people in a group, write "@<phone>" in the message for each person
+    (e.g. "@84901234567 check giúp") and list the same phone numbers (or JIDs)
+    in mentions. The bridge checks each one is a group member and fails without
+    sending if anyone is missing. Find phone numbers with search_contacts.
 
     Args:
         recipient: The recipient - either a phone number with country code but no + or other symbols,
                  or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
         message: The message text to send
+        mentions: Optional phone numbers (country code, digits only) or JIDs to tag; group only
 
     Returns:
         A dictionary containing success status and a status message
@@ -366,7 +372,7 @@ def send_message(recipient: str, message: str) -> dict[str, Any]:
         return {"success": False, "message": "Recipient must be provided"}
 
     # Call the whatsapp_send_message function with the unified recipient parameter
-    success, status_message = whatsapp_send_message(recipient, message)
+    success, status_message = whatsapp_send_message(recipient, message, mentions)
     return {"success": success, "message": status_message}
 
 
