@@ -927,19 +927,6 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		return
 	}
 
-	// Auto-download media if present
-	if mediaType != "" && url != "" && len(mediaKey) > 0 {
-		logger.Infof("Auto-downloading %s media for message %s", mediaType, msg.Info.ID)
-		go func() {
-			success, _, _, downloadPath, err := downloadMedia(client, messageStore, msg.Info.ID, chatJID)
-			if success && err == nil {
-				logger.Infof("✅ Auto-downloaded media: %s", downloadPath)
-			} else {
-				logger.Warnf("❌ Auto-download failed: %v", err)
-			}
-		}()
-	}
-
 	// Store message in database
 	err = messageStore.StoreMessage(
 		msg.Info.ID,
@@ -966,6 +953,20 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	if err != nil {
 		logger.Warnf("Failed to store message: %v", err)
 	} else {
+		// Auto-download media if present. downloadMedia reads the media info
+		// back from the database, so this must run only after StoreMessage.
+		if mediaType != "" && url != "" && len(mediaKey) > 0 {
+			logger.Infof("Auto-downloading %s media for message %s", mediaType, msg.Info.ID)
+			go func() {
+				success, _, _, downloadPath, err := downloadMedia(client, messageStore, msg.Info.ID, chatJID)
+				if success && err == nil {
+					logger.Infof("✅ Auto-downloaded media: %s", downloadPath)
+				} else {
+					logger.Warnf("❌ Auto-download failed: %v", err)
+				}
+			}()
+		}
+
 		// Log message reception
 		timestamp := msg.Info.Timestamp.Format("2006-01-02 15:04:05")
 		direction := "←"
@@ -1179,24 +1180,24 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	return true, mediaType, filename, absPath, nil
 }
 
-// Extract direct path from a WhatsApp media URL
+// Extract the direct path from a WhatsApp media URL.
+//
+// whatsmeow's Download ignores GetURL() and rebuilds the request as
+// "https://<media-conn host><directPath>&hash=...&mms-type=...". That only
+// works when directPath still carries its signed query string
+// ("?ccb=...&oh=...&oe=..."): stripping it yields an unsigned URL and the CDN
+// answers 403. So the direct path is everything after the host, query included.
+// Example URL: https://mmg.whatsapp.net/v/t62.7118-24/1381_n.enc?ccb=11-4&oh=...&oe=...
 func extractDirectPathFromURL(url string) string {
-	// The direct path is typically in the URL, we need to extract it
-	// Example URL: https://mmg.whatsapp.net/v/t62.7118-24/13812002_698058036224062_3424455886509161511_n.enc?ccb=11-4&oh=...
-
-	// Find the path part after the domain
-	parts := strings.SplitN(url, ".net/", 2)
-	if len(parts) < 2 {
+	rest := url
+	if idx := strings.Index(rest, "://"); idx >= 0 {
+		rest = rest[idx+3:]
+	}
+	slash := strings.Index(rest, "/")
+	if slash < 0 {
 		return url // Return original URL if parsing fails
 	}
-
-	pathPart := parts[1]
-
-	// Remove query parameters
-	pathPart = strings.SplitN(pathPart, "?", 2)[0]
-
-	// Create proper direct path format
-	return "/" + pathPart
+	return rest[slash:]
 }
 
 // Start a REST API server to expose the WhatsApp client functionality

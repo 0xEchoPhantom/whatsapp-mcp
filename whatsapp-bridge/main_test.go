@@ -400,3 +400,17 @@ func TestMigrateLegacyLIDChatsToPhoneJIDs_AggregatesByPhoneJIDDeterministically(
 		t.Fatalf("expected merged last_message_time to be max source value, got %s", lastMessage)
 	}
 }
+
+func TestExtractDirectPathFromURLKeepsSignedQuery(t *testing.T) {
+	cases := map[string]string{
+		"https://mmg.whatsapp.net/v/t62.7119-24/abc_n.enc?ccb=11-4&oh=sig&oe=6B18F6B6&_nc_sid=5e03e0&mms3=true": "/v/t62.7119-24/abc_n.enc?ccb=11-4&oh=sig&oe=6B18F6B6&_nc_sid=5e03e0&mms3=true",
+		"https://mmg.whatsapp.net/o1/v/t24/f2/m23/xyz.enc?ccb=9-4&oh=sig&oe=6B18EB67&_nc_sid=e6ed6c&mms3=true":  "/o1/v/t24/f2/m23/xyz.enc?ccb=9-4&oh=sig&oe=6B18EB67&_nc_sid=e6ed6c&mms3=true",
+		"https://web.whatsapp.net/v/t62/plain.enc":                                                              "/v/t62/plain.enc",
+		"not-a-url": "not-a-url",
+	}
+	for in, want := range cases {
+		if got := extractDirectPathFromURL(in); got != want {
+			t.Errorf("extractDirectPathFromURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
